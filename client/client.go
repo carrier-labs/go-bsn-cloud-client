@@ -9,49 +9,55 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"sync"
 	"time"
 
 	"github.com/carrier-labs/go-bsn-cloud-client/debug"
 )
 
-// DefaultBaseAPI is the default BSN.Cloud API base URL.
 const DefaultBaseAPI = "https://api.bsn.cloud/2022/06/REST"
 
-// Client is the main struct for interacting with the BSN.Cloud API.
-type Client struct {
+// Config holds configuration for the BSN.Cloud API client.
+type Config struct {
 	ClientID     string
 	ClientSecret string
-	BaseAPI      string
-	NetworkName  string
-	Token        string
-	Expiry       time.Time
-	mu           sync.Mutex
-	httpClient   *http.Client
+	BaseAPI      string        // Optional; if empty, DefaultBaseAPI is used
+	Timeout      time.Duration // Optional; if zero, 10s is used
+	NetworkName  string        // Optional; if set, network context is selected after auth
 }
 
-// New creates a new BSN.Cloud API client with the given credentials and optional base API URL and network name.
-// If baseAPI is empty, it defaults to DefaultBaseAPI.
-func New(clientID, clientSecret, baseAPI, networkName string) *Client {
+type Client struct {
+	clientID     string
+	clientSecret string
+	baseAPI      string
+	httpClient   *http.Client
+	Token        string
+	Expiry       time.Time
+	NetworkName  string
+}
+
+// New creates a new BSN.Cloud API client using the provided Config.
+func New(cfg Config) *Client {
+	baseAPI := cfg.BaseAPI
 	if baseAPI == "" {
 		baseAPI = DefaultBaseAPI
 	}
-	c := &Client{
-		ClientID:     clientID,
-		ClientSecret: clientSecret,
-		BaseAPI:      baseAPI,
-		NetworkName:  networkName,
-		httpClient:   &http.Client{Timeout: 10 * time.Second},
+	timeout := cfg.Timeout
+	if timeout == 0 {
+		timeout = 10 * time.Second
 	}
-	debug.Debug("Client initialized", "clientID", clientID, "baseAPI", baseAPI, "networkName", networkName)
+	c := &Client{
+		clientID:     cfg.ClientID,
+		clientSecret: cfg.ClientSecret,
+		baseAPI:      baseAPI,
+		httpClient:   &http.Client{Timeout: timeout},
+		NetworkName:  cfg.NetworkName,
+	}
+	debug.Debug("Client initialized", "clientID", cfg.ClientID, "baseAPI", baseAPI, "networkName", cfg.NetworkName)
 	return c
 }
 
 // Authenticate fetches and caches an access token for the BSN.Cloud API.
 func (c *Client) Authenticate(ctx context.Context) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
 	if time.Now().Before(c.Expiry.Add(-30 * time.Second)) {
 		return nil
 	}
@@ -69,7 +75,7 @@ func (c *Client) Authenticate(ctx context.Context) error {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	auth := base64.StdEncoding.EncodeToString([]byte(c.ClientID + ":" + c.ClientSecret))
+	auth := base64.StdEncoding.EncodeToString([]byte(c.clientID + ":" + c.clientSecret))
 	req.Header.Set("Authorization", "Basic "+auth)
 
 	resp, err := c.httpClient.Do(req)
@@ -90,12 +96,83 @@ func (c *Client) Authenticate(ctx context.Context) error {
 	}
 	c.Token = ar.AccessToken
 	c.Expiry = time.Now().Add(time.Duration(ar.ExpiresIn) * time.Second)
+
+	// Set network context if configured
+	if c.NetworkName != "" {
+		if err := c.SelectNetwork(ctx); err != nil {
+			return fmt.Errorf("network selection error: %w", err)
+		}
+	}
 	return nil
+}
+
+// DoRequest performs an HTTP request with context and returns the response body.
+func (c *Client) DoRequest(ctx context.Context, method, endpoint string, body interface{}) ([]byte, error) {
+	var reqBody io.Reader
+	var bodyBytes []byte
+	if body != nil {
+		b, err := json.Marshal(body)
+		if err != nil {
+			return nil, err
+		}
+		bodyBytes = b
+		reqBody = bytes.NewBuffer(b)
+	}
+	url := c.baseAPI + endpoint
+	req, err := http.NewRequestWithContext(ctx, method, url, reqBody)
+	if err != nil {
+		return nil, err
+	}
+	if c.Token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.Token)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+
+	// Log request details
+	reqHeaders := map[string][]string{}
+	for k, v := range req.Header {
+		reqHeaders[k] = v
+	}
+	debug.Debug("DoRequest: request", "method", req.Method, "url", req.URL.String(), "headers", reqHeaders, "body", string(bodyBytes))
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	// Log response headers
+	respHeaders := map[string][]string{}
+	for k, v := range resp.Header {
+		respHeaders[k] = v
+	}
+	debug.Debug("DoRequest: response status", "status", resp.StatusCode, "headers", respHeaders)
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	if len(respBody) == 0 {
+		return nil, fmt.Errorf("API returned empty response body (status %d)", resp.StatusCode)
+	}
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("API error: %s", respBody)
+	}
+	return respBody, nil
+}
+
+// HttpClient returns the underlying http.Client for advanced use.
+func (c *Client) HttpClient() *http.Client {
+	return c.httpClient
 }
 
 // SelectNetwork sets the active network context for the client.
 func (c *Client) SelectNetwork(ctx context.Context) error {
-	url := c.BaseAPI + "/self/session/network"
+	if c.NetworkName == "" {
+		return nil
+	}
+	url := c.baseAPI + "/self/session/network"
 	body := map[string]string{"name": c.NetworkName}
 	buf, _ := json.Marshal(body)
 
@@ -111,7 +188,10 @@ func (c *Client) SelectNetwork(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	debug.Debug("API call", "method", req.Method, "url", req.URL.String(), "body", string(buf))
+	debug.Debug("API call", "method", req.Method, "url", req.URL.String(), "body", string(buf), "response_status", resp.StatusCode)
+	for k, v := range resp.Header {
+		debug.Debug("API response header", "key", k, "value", v)
+	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 204 {
 		body, _ := io.ReadAll(resp.Body)
@@ -119,41 +199,4 @@ func (c *Client) SelectNetwork(ctx context.Context) error {
 		return fmt.Errorf("network select failed: %s", resp.Status)
 	}
 	return nil
-}
-
-// ListNetworks fetches available networks for the authenticated user.
-func (c *Client) ListNetworks(ctx context.Context) ([]map[string]interface{}, error) {
-	url := c.BaseAPI + "/networks"
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Authorization", "Bearer "+c.Token)
-	req.Header.Set("Accept", "application/json")
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	debug.Debug("API call", "method", req.Method, "url", req.URL.String())
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		debug.Debug("API error response", "status", resp.Status, "body", string(body))
-		return nil, fmt.Errorf("networks fetch failed: %s - %s", resp.Status, body)
-	}
-	var result struct {
-		Items []map[string]interface{} `json:"items"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		debug.Debug("API decode error", "error", err)
-		return nil, err
-	}
-	pretty, _ := json.MarshalIndent(result, "", "  ")
-	debug.Debug("API response", "data", string(pretty))
-	return result.Items, nil
-}
-
-// HttpClient returns the underlying http.Client for making requests.
-func (c *Client) HttpClient() *http.Client {
-	return c.httpClient
 }
