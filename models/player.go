@@ -2,7 +2,9 @@
 package models
 
 import (
-	"time"
+	"encoding/json"
+
+	"github.com/carrier-labs/go-bsn-cloud-client/utils"
 )
 
 // Player represents a player (device) in BSN.Cloud.
@@ -11,8 +13,8 @@ type Player struct {
 	Serial           string             `json:"serial"`           // Serial number
 	Model            PlayerModel        `json:"model"`            // Player model
 	Family           PlayerFamily       `json:"family"`           // Player family
-	RegistrationDate time.Time          `json:"registrationDate"` // Registration date
-	LastModifiedDate time.Time          `json:"lastModifiedDate"` // Last modification date
+	RegistrationDate utils.BsnTime      `json:"registrationDate"` // Registration date
+	LastModifiedDate utils.BsnTime      `json:"lastModifiedDate"` // Last modification date
 	Settings         PlayerSettings     `json:"settings"`         // Player settings
 	Status           PlayerFullStatus   `json:"status"`           // Player status
 	Subscription     PlayerSubscription `json:"subscription"`     // Player subscription
@@ -43,7 +45,7 @@ type PlayerSettings struct {
 	Logging             *DeviceLogsSettings            `json:"logging,omitempty"`          // Logging settings
 	LWS                 *LocalWebServerSettings        `json:"lws,omitempty"`              // Local web server settings
 	LDWS                *DiagnosticWebServerSettings   `json:"ldws,omitempty"`             // Diagnostic web server settings
-	LastModifiedDate    *time.Time                     `json:"lastModifiedDate,omitempty"` // Last modification date
+	LastModifiedDate    *utils.BsnTime                 `json:"lastModifiedDate,omitempty"` // Last modification date
 }
 
 // DeviceSetupType is an enum for player setup types.
@@ -171,12 +173,59 @@ type PlayerFullStatus struct {
 	Storage                  []StorageStatus             `json:"storage"`                    // Storage status
 	Network                  PlayerNetworkStatus         `json:"network"`                    // Network status
 	Uptime                   TimeSpan                    `json:"uptime"`                     // Uptime
-	CurrentSettingsTimestamp time.Time                   `json:"currentSettingsTimestamp"`   // Current settings timestamp
-	CurrentScheduleTimestamp time.Time                   `json:"currentScheduleTimestamp"`   // Current schedule timestamp
+	CurrentSettingsTimestamp utils.BsnTime               `json:"currentSettingsTimestamp"`   // Current settings timestamp
+	CurrentScheduleTimestamp utils.BsnTime               `json:"currentScheduleTimestamp"`   // Current schedule timestamp
 	Timezone                 string                      `json:"timezone"`                   // Timezone
 	Health                   PlayerHealthStatus          `json:"health"`                     // Health status
-	LastModifiedDate         *time.Time                  `json:"lastModifiedDate,omitempty"` // Last modification date
+	LastModifiedDate         *utils.BsnTime              `json:"lastModifiedDate,omitempty"` // Last modification date
 	Synchronization          PlayerSynchronizationStatus `json:"synchronization"`            // Synchronization status
+}
+
+// UnmarshalJSON handles presentation as either an object, array, or null.
+func (p *PlayerFullStatus) UnmarshalJSON(data []byte) error {
+	type Alias PlayerFullStatus
+	aux := &struct {
+		Presentation json.RawMessage `json:"presentation"`
+		*Alias
+	}{
+		Alias: (*Alias)(p),
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	// Handle presentation as array, object, or null
+	var arr []PresentationInfo
+	if len(aux.Presentation) == 0 || string(aux.Presentation) == "null" {
+		p.Presentation = nil
+	} else if aux.Presentation[0] == '{' {
+		var single PresentationInfo
+		if err := json.Unmarshal(aux.Presentation, &single); err != nil {
+			return err
+		}
+		p.Presentation = []PresentationInfo{single}
+	} else if aux.Presentation[0] == '[' {
+		if err := json.Unmarshal(aux.Presentation, &arr); err != nil {
+			return err
+		}
+		p.Presentation = arr
+	} else {
+		p.Presentation = nil
+	}
+	// Copy other fields
+	p.Group = aux.Group
+	p.BrightWall = aux.BrightWall
+	p.Script = aux.Script
+	p.Firmware = aux.Firmware
+	p.Storage = aux.Storage
+	p.Network = aux.Network
+	p.Uptime = aux.Uptime
+	p.CurrentSettingsTimestamp = aux.CurrentSettingsTimestamp
+	p.CurrentScheduleTimestamp = aux.CurrentScheduleTimestamp
+	p.Timezone = aux.Timezone
+	p.Health = aux.Health
+	p.LastModifiedDate = aux.LastModifiedDate
+	p.Synchronization = aux.Synchronization
+	return nil
 }
 
 // GroupInfo represents group information.
@@ -241,6 +290,42 @@ type StorageStatus struct {
 	System    FileSystem       `json:"system"`    // File system
 	Access    []AccessMode     `json:"access"`    // Access modes
 	Stats     StorageStats     `json:"stats"`     // Storage stats
+}
+
+// UnmarshalJSON handles access as either a CSV string or array.
+func (s *StorageStatus) UnmarshalJSON(data []byte) error {
+	type Alias StorageStatus
+	aux := &struct {
+		Access interface{} `json:"access"`
+		*Alias
+	}{
+		Alias: (*Alias)(s),
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	s.Interface = aux.Interface
+	s.System = aux.System
+	s.Stats = aux.Stats
+
+	s.Access = nil
+	switch v := aux.Access.(type) {
+	case string:
+		if v == "" {
+			s.Access = nil
+		} else {
+			for _, part := range splitAndTrim(v, ",") {
+				s.Access = append(s.Access, AccessMode(part))
+			}
+		}
+	case []interface{}:
+		for _, item := range v {
+			if str, ok := item.(string); ok {
+				s.Access = append(s.Access, AccessMode(str))
+			}
+		}
+	}
+	return nil
 }
 
 // StorageInterface is an enum for storage interfaces.
@@ -342,11 +427,11 @@ type PlayerSubscription struct {
 	Type             PlayerSubscriptionType   `json:"type"`                     // Subscription type
 	ActivityPeriod   TimeSpan                 `json:"activityPeriod"`           // Activity period
 	Status           DeviceSubscriptionStatus `json:"status"`                   // Subscription status
-	CreationDate     time.Time                `json:"creationDate"`             // Creation date
-	ActivationDate   *time.Time               `json:"activationDate,omitempty"` // Activation date
-	SuspensionDate   *time.Time               `json:"suspensionDate,omitempty"` // Suspension date
-	ExpirationDate   *time.Time               `json:"expirationDate,omitempty"` // Expiration date
-	LastModifiedDate time.Time                `json:"lastModifiedDate"`         // Last modified date
+	CreationDate     utils.BsnTime            `json:"creationDate"`             // Creation date
+	ActivationDate   *utils.BsnTime           `json:"activationDate,omitempty"` // Activation date
+	SuspensionDate   *utils.BsnTime           `json:"suspensionDate,omitempty"` // Suspension date
+	ExpirationDate   *utils.BsnTime           `json:"expirationDate,omitempty"` // Expiration date
+	LastModifiedDate utils.BsnTime            `json:"lastModifiedDate"`         // Last modified date
 }
 
 // DeviceInfo represents minimal device info for a subscription.
@@ -390,15 +475,15 @@ type TaggedGroupInfo struct {
 
 // Permission represents a permission entity for a player.
 type Permission struct {
-	EntityId     *int      `json:"entityId,omitempty"` // Entity ID
-	OperationUID string    `json:"operationUID"`       // Operation UID
-	Principal    Principal `json:"principal"`          // Principal
-	User         string    `json:"user,omitempty"`     // User
-	Role         string    `json:"role,omitempty"`     // Role
-	IsFixed      bool      `json:"isFixed"`            // Whether fixed
-	IsInherited  bool      `json:"isInherited"`        // Whether inherited
-	IsAllowed    bool      `json:"isAllowed"`          // Whether allowed
-	CreationDate time.Time `json:"creationDate"`       // Creation date
+	EntityId     *int          `json:"entityId,omitempty"` // Entity ID
+	OperationUID string        `json:"operationUID"`       // Operation UID
+	Principal    Principal     `json:"principal"`          // Principal
+	User         string        `json:"user,omitempty"`     // User
+	Role         string        `json:"role,omitempty"`     // Role
+	IsFixed      bool          `json:"isFixed"`            // Whether fixed
+	IsInherited  bool          `json:"isInherited"`        // Whether inherited
+	IsAllowed    bool          `json:"isAllowed"`          // Whether allowed
+	CreationDate utils.BsnTime `json:"creationDate"`       // Creation date
 }
 
 // Principal represents the principal entity for permissions.

@@ -2,6 +2,8 @@
 // Package models contains shared data structures for the BSN.Cloud API client.
 package models
 
+import "encoding/json"
+
 // PlayerNetworkInterfaceSettings is the base interface for all network interface settings.
 type PlayerNetworkInterfaceSettings interface {
 	// GetType returns the type of the network interface settings.
@@ -131,4 +133,62 @@ type PlayerCellularModuleSettings struct {
 // PlayerCellularConnectionSettings represents cellular connection options.
 type PlayerCellularConnectionSettings struct {
 	// TODO: Fill in fields from API docs if available
+}
+
+// Only the UnmarshalJSON method for PlayerNetworkSettings is defined here. The struct is defined in network.go.
+// UnmarshalJSON implements custom unmarshalling for PlayerNetworkSettings.
+// It handles the interfaces field as a sum type.
+func (p *PlayerNetworkSettings) UnmarshalJSON(data []byte) error {
+	type Alias PlayerNetworkSettings
+	aux := &struct {
+		Interfaces []json.RawMessage `json:"interfaces"`
+		*Alias
+	}{
+		Alias: (*Alias)(p),
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	p.Hostname = aux.Hostname
+	p.ProxyServer = aux.ProxyServer
+	p.ProxyBypass = aux.ProxyBypass
+	p.TimeServers = aux.TimeServers
+	p.Interfaces = make([]PlayerNetworkInterfaceSettings, 0, len(aux.Interfaces))
+	for _, raw := range aux.Interfaces {
+		var typeProbe struct {
+			Type PlayerNetworkInterfaceType `json:"type"`
+		}
+		if err := json.Unmarshal(raw, &typeProbe); err != nil {
+			return err
+		}
+		switch typeProbe.Type {
+		case PlayerNetworkInterfaceTypeEthernet:
+			var eth EthernetInterfaceSettings
+			if err := json.Unmarshal(raw, &eth); err != nil {
+				return err
+			}
+			p.Interfaces = append(p.Interfaces, eth)
+		case PlayerNetworkInterfaceTypeWiFi:
+			var wifi WiFiInterfaceSettings
+			if err := json.Unmarshal(raw, &wifi); err != nil {
+				return err
+			}
+			p.Interfaces = append(p.Interfaces, wifi)
+		case PlayerNetworkInterfaceTypeVirtual:
+			var virt VirtualInterfaceSettings
+			if err := json.Unmarshal(raw, &virt); err != nil {
+				return err
+			}
+			p.Interfaces = append(p.Interfaces, virt)
+		case PlayerNetworkInterfaceTypeCellular:
+			var cell CellularInterfaceSettings
+			if err := json.Unmarshal(raw, &cell); err != nil {
+				return err
+			}
+			p.Interfaces = append(p.Interfaces, cell)
+		default:
+			// Unknown type, skip or handle as needed
+		}
+	}
+	return nil
 }

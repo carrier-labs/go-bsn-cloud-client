@@ -4,6 +4,7 @@ package models
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 )
 
 // PlayerNetworkStatus represents the network status of a player, including all interfaces.
@@ -61,6 +62,72 @@ type NetworkInterfaceStatus struct {
 	Ip      []string                       `json:"ip"`               // IP addresses
 	Gateway string                         `json:"gateway"`          // Gateway
 	Metric  *int                           `json:"metric,omitempty"` // Metric
+}
+
+// UnmarshalJSON handles proto as either a CSV string or array.
+func (n *NetworkInterfaceStatus) UnmarshalJSON(data []byte) error {
+	type Alias NetworkInterfaceStatus
+	aux := &struct {
+		Proto interface{} `json:"proto"`
+		*Alias
+	}{
+		Alias: (*Alias)(n),
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+
+	switch v := aux.Proto.(type) {
+	case string:
+		// CSV string
+		if v == "" {
+			n.Proto = nil
+		} else {
+			parts := make([]NetworkConfigurationProtocol, 0)
+			for _, s := range splitAndTrim(v, ",") {
+				parts = append(parts, NetworkConfigurationProtocol(s))
+			}
+			n.Proto = parts
+		}
+	case []interface{}:
+		parts := make([]NetworkConfigurationProtocol, 0, len(v))
+		for _, s := range v {
+			if str, ok := s.(string); ok {
+				parts = append(parts, NetworkConfigurationProtocol(str))
+			}
+		}
+		n.Proto = parts
+	default:
+		n.Proto = nil
+	}
+
+	n.Name = aux.Name
+	n.Type = aux.Type
+	n.Mac = aux.Mac
+	n.Ip = aux.Ip
+	n.Gateway = aux.Gateway
+	n.Metric = aux.Metric
+	return nil
+}
+
+// splitAndTrim splits a string by sep and trims whitespace from each part.
+func splitAndTrim(s, sep string) []string {
+	var out []string
+	for _, part := range split(s, sep) {
+		trimmed := trim(part)
+		if trimmed != "" {
+			out = append(out, trimmed)
+		}
+	}
+	return out
+}
+
+func split(s, sep string) []string {
+	return strings.Split(s, sep)
+}
+
+func trim(s string) string {
+	return strings.TrimSpace(s)
 }
 
 // GetType returns the type of the network interface.

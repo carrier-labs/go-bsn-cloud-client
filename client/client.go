@@ -11,10 +11,12 @@ import (
 	"net/http"
 	"sync"
 	"time"
+
+	"github.com/carrier-labs/go-bsn-cloud-client/debug"
 )
 
 // DefaultBaseAPI is the default BSN.Cloud API base URL.
-const DefaultBaseAPI = "https://api.bsn.cloud/v1"
+const DefaultBaseAPI = "https://api.bsn.cloud/2022/06/REST"
 
 // Client is the main struct for interacting with the BSN.Cloud API.
 type Client struct {
@@ -34,13 +36,15 @@ func New(clientID, clientSecret, baseAPI, networkName string) *Client {
 	if baseAPI == "" {
 		baseAPI = DefaultBaseAPI
 	}
-	return &Client{
+	c := &Client{
 		ClientID:     clientID,
 		ClientSecret: clientSecret,
 		BaseAPI:      baseAPI,
 		NetworkName:  networkName,
 		httpClient:   &http.Client{Timeout: 10 * time.Second},
 	}
+	debug.Debug("Client initialized", "clientID", clientID, "baseAPI", baseAPI, "networkName", networkName)
+	return c
 }
 
 // Authenticate fetches and caches an access token for the BSN.Cloud API.
@@ -72,9 +76,11 @@ func (c *Client) Authenticate(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	debug.Debug("API call", "method", req.Method, "url", req.URL.String())
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
 		body, _ := io.ReadAll(resp.Body)
+		debug.Debug("API error response", "status", resp.Status, "body", string(body))
 		return fmt.Errorf("auth failed: %s -- %s", resp.Status, body)
 	}
 
@@ -105,8 +111,11 @@ func (c *Client) SelectNetwork(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	debug.Debug("API call", "method", req.Method, "url", req.URL.String(), "body", string(buf))
 	defer resp.Body.Close()
 	if resp.StatusCode != 204 {
+		body, _ := io.ReadAll(resp.Body)
+		debug.Debug("API error response", "status", resp.Status, "body", string(body))
 		return fmt.Errorf("network select failed: %s", resp.Status)
 	}
 	return nil
@@ -125,17 +134,22 @@ func (c *Client) ListNetworks(ctx context.Context) ([]map[string]interface{}, er
 	if err != nil {
 		return nil, err
 	}
+	debug.Debug("API call", "method", req.Method, "url", req.URL.String())
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
+		debug.Debug("API error response", "status", resp.Status, "body", string(body))
 		return nil, fmt.Errorf("networks fetch failed: %s - %s", resp.Status, body)
 	}
 	var result struct {
 		Items []map[string]interface{} `json:"items"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		debug.Debug("API decode error", "error", err)
 		return nil, err
 	}
+	pretty, _ := json.MarshalIndent(result, "", "  ")
+	debug.Debug("API response", "data", string(pretty))
 	return result.Items, nil
 }
 
